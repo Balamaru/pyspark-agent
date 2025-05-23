@@ -1,0 +1,35 @@
+{
+  "jobName": "Customer Orders with Details",
+  "source": {
+    "type": "s3",
+    "access_key": "AKIAUAUYAYSBA",
+    "secret_key": "JBEYBYDWBSWHDVYWDBWDGWCWH",
+    "bucket": "raw-data",
+    "format": "parquet",
+    "path": "orders/2024/"
+  },
+  "transforms": [
+    {
+      "type": "join",
+      "parameters": {
+        "join_type": "inner",
+        "right_table": "customers_df",
+        "join_condition": "orders_df.customer_id == customers_df.id"
+      }
+    },
+    {
+      "type": "select",
+      "parameters": {
+        "columns": ["order_id", "customer_name", "email", "amount", "order_date"]
+      }
+    }
+  ],
+  "target": {
+    "type": "s3",
+    "access_key": "AKIAUAUYAYSBA",
+    "secret_key": "JBEYBYDWBSWHDVYWDBWDGWCWH",
+    "bucket": "processed-data",
+    "format": "parquet",
+    "path": "enriched/customer-orders.parquet"
+  }
+}

@@ -1,0 +1,16 @@
+[
+  {
+    "type": "sql",
+    "parameters": {
+      "temp_view": "step1",
+      "query": "SELECT col1, col2, SUM(col3) as total FROM step1 GROUP BY col1, col2"
+    }
+  },
+  {
+    "type": "sql", 
+    "parameters": {
+      "temp_view": "step2",
+      "query": "SELECT *, RANK() OVER (ORDER BY total DESC) as rank FROM step2"
+    }
+  }
+]

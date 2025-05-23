@@ -1,0 +1,30 @@
+{
+  "jobName": "Simple SQL Transform",
+  "source": {
+    "type": "postgresql",
+    "host": "dcloud-dwh.dtc.best",
+    "port": 5435,
+    "database": "dev",
+    "table": "public.hr_analytics",
+    "user": "vicky",
+    "password": "fjQeWhj7jn1"
+  },
+  "transforms": [
+    {
+      "type": "sql",
+      "parameters": {
+        "temp_view": "orders_view",
+        "query": "SELECT gender, COUNT(empid) AS jumlah_karyawan FROM hr_analytics GROUP BY gender;"
+      }
+    }
+  ],
+  "target": {
+    "type": "s3_compatible",
+    "access_key": "AKIAUAUYAYSBA",
+    "secret_key": "JBEYBYDWBSWHDVYWDBWDGWCWH",
+    "bucket": "dummycsv",
+    "format": "parquet",
+    "path": "analytics/test-agent.parquet",
+    "endpoint_url": "https://s3-penyedia.layanan.com"
+  }
+}

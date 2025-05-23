@@ -1,0 +1,95 @@
+{
+  "jobName": "Sales Data Processing Pipeline",
+  "source": {
+    "type": "s3_compatible",
+    "access_key": "AKIAUAUYAYSBA",
+    "secret_key": "JBEYBYDWBSWHDVYWDBWDGWCWH",
+    "bucket": "dummycsv",
+    "format": "csv",
+    "path": "hr-analytics.csv",
+    "endpoint_url": "https://s3-penyedia.layanan.com"
+  },
+  "transforms": [
+    {
+      "type": "filter",
+      "parameters": {
+        "condition": "amount > 1000 AND status = 'completed'"
+      }
+    },
+    {
+      "type": "select",
+      "parameters": {
+        "columns": ["customer_id", "product_name", "amount", "order_date", "status"]
+      }
+    },
+    {
+      "type": "rename_column",
+      "parameters": {
+        "old_name": "customer_id",
+        "new_name": "customer_identifier"
+      }
+    },
+    {
+      "type": "add_column",
+      "parameters": {
+        "column_name": "amount_category",
+        "expression": "when(col('amount') > 5000, 'high').when(col('amount') > 2000, 'medium').otherwise('low')"
+      }
+    },
+    {
+      "type": "cast_column",
+      "parameters": {
+        "column_name": "order_date",
+        "data_type": "timestamp"
+      }
+    },
+    {
+      "type": "fill_na",
+      "parameters": {
+        "fill_value": "unknown",
+        "columns": ["product_name"]
+      }
+    },
+    {
+      "type": "drop_duplicates",
+      "parameters": {
+        "columns": ["customer_identifier", "order_date"]
+      }
+    },
+    {
+      "type": "groupby",
+      "parameters": {
+        "group_by": ["customer_identifier", "amount_category"],
+        "aggregations": {
+          "amount": "sum",
+          "product_name": "count"
+        }
+      }
+    },
+    {
+      "type": "order_by",
+      "parameters": {
+        "columns": [
+          {
+            "column": "sum(amount)",
+            "order": "desc"
+          },
+          {
+            "column": "customer_identifier",
+            "order": "asc"
+          }
+        ]
+      }
+    }
+  ],
+  "target": {
+    "type": "postgresql",
+    "host": "db.example.com",
+    "port": 5432,
+    "database": "analytics_db",
+    "table": "customer_sales_summary",
+    "mode": "overwrite",
+    "user": "analyzer",
+    "password": "secure_password"
+  }
+}
