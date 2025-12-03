@@ -1,0 +1,212 @@
+{
+  "jobName": "all-in-one-transform",
+  "createConfigMap": true,
+  "source": {
+    "type": "s3_compatible",
+    "access_key": "AKIAVVHVDYWDWSHBQSVWYDHV",
+    "secret_key": "HADVDhdfyaBDBHJWVDYWDWYDVhvSDBHDBWBD",
+    "bucket": "mybucket",
+    "format": "csv",
+    "path": "dirty_lifestyle_health.csv",
+    "endpoint_url": "https://s3-penyedia.layanan.com"
+  },
+  "transforms": [
+    {
+      "type": "filter",
+      "parameters": {
+        "condition": "age IS NOT NULL AND age < 100 AND bmi IS NOT NULL"
+      }
+    },
+    {
+      "type": "select",
+      "parameters": {
+        "columns": ["RiskLevel", "Name", "Age", "Gender", "Smoking", "AlcoholIntake", "Exercise", "BMI", "BloodPressure", "SleepHours"]
+      }
+    },
+    {
+      "type": "rename_column",
+      "parameters": {
+        "old_name": "RiskLevel",
+        "new_name": "risk_level"
+      }
+    },
+    {
+      "type": "rename_column",
+      "parameters": {
+        "old_name": "Name",
+        "new_name": "name"
+      }
+    },
+    {
+      "type": "rename_column",
+      "parameters": {
+        "old_name": "Age",
+        "new_name": "age"
+      }
+    },
+    {
+      "type": "rename_column",
+      "parameters": {
+        "old_name": "Gender",
+        "new_name": "gender"
+      }
+    },
+    {
+      "type": "rename_column",
+      "parameters": {
+        "old_name": "Smoking",
+        "new_name": "smoking"
+      }
+    },
+    {
+      "type": "rename_column",
+      "parameters": {
+        "old_name": "AlcoholIntake",
+        "new_name": "alcohol_intake"
+      }
+    },
+    {
+      "type": "rename_column",
+      "parameters": {
+        "old_name": "Exercise",
+        "new_name": "exercise"
+      }
+    },
+    {
+      "type": "rename_column",
+      "parameters": {
+        "old_name": "BMI",
+        "new_name": "bmi"
+      }
+    },
+    {
+      "type": "rename_column",
+      "parameters": {
+        "old_name": "BloodPressure",
+        "new_name": "blood_pressure"
+      }
+    },
+    {
+      "type": "rename_column",
+      "parameters": {
+        "old_name": "SleepHours",
+        "new_name": "sleep_hours"
+      }
+    },
+    {
+      "type": "drop_column",
+      "parameters": {
+        "columns": ["name"]
+      }
+    },
+    {
+      "type": "add_column",
+      "parameters": {
+        "column_name": "bmi_category",
+        "expression": "when(col('bmi') >= 30, 'obese').when(col('bmi') >= 25, 'overweight').when(col('bmi') >= 18.5, 'normal').otherwise('underweight')"
+      }
+    },
+    {
+      "type": "add_column",
+      "parameters": {
+        "column_name": "age_group",
+        "expression": "when(col('age') < 30, 'young').when(col('age') < 50, 'middle').otherwise('senior')"
+      }
+    },
+    {
+      "type": "add_column",
+      "parameters": {
+        "column_name": "processed_date",
+        "expression": "current_date()"
+      }
+    },
+    {
+      "type": "cast_column",
+      "parameters": {
+        "column_name": "age",
+        "data_type": "int"
+      }
+    },
+    {
+      "type": "cast_column",
+      "parameters": {
+        "column_name": "bmi",
+        "data_type": "double"
+      }
+    },
+    {
+      "type": "cast_column",
+      "parameters": {
+        "column_name": "sleep_hours",
+        "data_type": "double"
+      }
+    },
+    {
+      "type": "fill_na",
+      "parameters": {
+        "fill_value": "'unknown'",
+        "columns": ["smoking", "alcohol_intake", "exercise"]
+      }
+    },
+    {
+      "type": "fill_na",
+      "parameters": {
+        "fill_value": 0,
+        "columns": ["sleep_hours"]
+      }
+    },
+    {
+      "type": "drop_duplicates",
+      "parameters": {
+        "columns": ["age", "gender", "bmi", "blood_pressure"]
+      }
+    },
+    {
+      "type": "sql",
+      "parameters": {
+        "temp_view": "health_data",
+        "query": "SELECT *, CASE WHEN bmi > 30 AND sleep_hours < 6 THEN 'critical' WHEN bmi > 25 AND sleep_hours < 7 THEN 'warning' ELSE 'normal' END as health_alert FROM health_data"
+      }
+    },
+    {
+      "type": "groupby",
+      "parameters": {
+        "group_by": ["risk_level", "bmi_category", "age_group"],
+        "aggregations": {
+          "age": "avg",
+          "bmi": "avg",
+          "sleep_hours": "avg",
+          "gender": "count"
+        }
+      }
+    },
+    {
+      "type": "order_by",
+      "parameters": {
+        "columns": [
+          {
+            "column": "risk_level",
+            "order": "asc"
+          },
+          {
+            "column": "avg(bmi)",
+            "order": "desc"
+          },
+          {
+            "column": "count(gender)",
+            "order": "desc"
+          }
+        ]
+      }
+    }
+  ],
+  "target": {
+    "type": "s3_compatible",
+    "access_key": "AKIAVVHVDYWDWSHBQSVWYDHV",
+    "secret_key": "HADVDhdfyaBDBHJWVDYWDWYDVhvSDBHDBWBD",
+    "bucket": "mybucket",
+    "format": "csv",
+    "path": "analytics/all-transform.csv",
+    "endpoint_url": "https://s3-penyedia.layanan.com"
+  }
+}
