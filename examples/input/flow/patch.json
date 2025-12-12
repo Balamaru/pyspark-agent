@@ -1,0 +1,32 @@
+{
+  "transforms": [
+    {
+      "type": "select",
+      "parameters": {
+        "columns": ["Age", "Gender", "Smoking", "BMI", "SleepHours"]
+      }
+    },
+    {
+      "type": "fill_na",
+      "parameters": {
+        "fill_value": "'unknown'",
+        "columns": ["Smoking", "Gender"]
+      }
+    },
+    {
+      "type": "fill_na",
+      "parameters": {
+        "fill_value": 0,
+        "columns": ["Age","BMI", "SleepHours"]
+      }
+    },
+    {
+      "type": "order_by",
+      "parameters": {
+        "columns": [
+          { "column": "Age", "order": "desc" }
+        ]
+      }
+    }
+  ]
+}

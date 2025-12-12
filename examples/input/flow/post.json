@@ -1,0 +1,44 @@
+{
+  "jobName": "new-feature",
+  "createConfigMap": true,
+  "source": {
+    "type": "s3_compatible",
+    "access_key": "AJSBBDWBDUWJBDUWJ",
+    "secret_key": "hbeyavHVYWFGWUDGuebfyevfbqy",
+    "bucket": "dummycsv",
+    "format": "csv",
+    "path": "dirty_lifestyle_health.csv",
+    "endpoint_url": "https://enpoint.com"
+  },
+  "transforms": [
+    {
+      "type": "select",
+      "parameters": {
+        "columns": ["Age", "Gender", "Smoking", "BMI", "SleepHours"]
+      }
+    },
+    {
+      "type": "fill_na",
+      "parameters": {
+        "fill_value": "'unknown'",
+        "columns": ["Smoking", "Gender"]
+      }
+    },
+    {
+      "type": "fill_na",
+      "parameters": {
+        "fill_value": 0,
+        "columns": ["Age","BMI", "SleepHours"]
+      }
+    }
+  ],
+  "target": {
+    "type": "s3_compatible",
+    "access_key": "AJSBBDWBDUWJBDUWJ",
+    "secret_key": "hbeyavHVYWFGWUDGuebfyevfbqy",
+    "bucket": "dummycsv",
+    "format": "csv",
+    "path": "analytics/demo-result.csv",
+    "endpoint_url": "https://enpoint.com"
+  }
+}

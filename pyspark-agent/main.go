@@ -11,20 +11,20 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 type ETLJobRequest struct {
-	JobName    string      `json:"jobName"`
-	Source     DataSource  `json:"source"`
-	Transforms []Transform `json:"transforms,omitempty"`
-	Target     *Target     `json:"target,omitempty"`
-	// New fields for ConfigMap
-	CreateConfigMap bool   `json:"createConfigMap,omitempty"`
-	ConfigMapName   string `json:"configMapName,omitempty"`
-	Namespace       string `json:"namespace,omitempty"`
+	JobName         string      `json:"jobName"`
+	Source          DataSource  `json:"source"`
+	Transforms      []Transform `json:"transforms,omitempty"`
+	Target          *Target     `json:"target,omitempty"`
+	CreateConfigMap bool        `json:"createConfigMap,omitempty"`
+	ConfigMapName   string      `json:"configMapName,omitempty"`
+	Namespace       string      `json:"namespace,omitempty"`
 }
 
 type DataSource struct {
@@ -74,14 +74,13 @@ type GenerateResponse struct {
 
 var kubeClient *kubernetes.Clientset
 
+// Kubernetes Client Initialization
 func initKubernetesClient() error {
 	var config *rest.Config
 	var err error
 
-	// Try in-cluster config first (when running inside Kubernetes)
 	config, err = rest.InClusterConfig()
 	if err != nil {
-		// Fallback to kubeconfig (for local development)
 		kubeconfig := os.Getenv("KUBECONFIG")
 		if kubeconfig == "" {
 			kubeconfig = os.Getenv("HOME") + "/.kube/config"
@@ -101,7 +100,8 @@ func initKubernetesClient() error {
 	return nil
 }
 
-func createConfigMap(namespace, name, fileName, scriptContent string) error {
+// Create/Update ConfigMap (With Annotation)
+func createConfigMapWithAnnotations(namespace, name, fileName, scriptContent, jobJson string) error {
 	if kubeClient == nil {
 		return fmt.Errorf("kubernetes client not initialized")
 	}
@@ -115,6 +115,9 @@ func createConfigMap(namespace, name, fileName, scriptContent string) error {
 				"generated":   "true",
 				"script-type": "pyspark",
 			},
+			Annotations: map[string]string{
+				"etl-job-definition": jobJson,
+			},
 		},
 		Data: map[string]string{
 			fileName: scriptContent,
@@ -122,57 +125,40 @@ func createConfigMap(namespace, name, fileName, scriptContent string) error {
 	}
 
 	ctx := context.Background()
-
-	// Check if ConfigMap already exists
 	existingCM, err := kubeClient.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+
 	if err == nil {
-		// ConfigMap exists, update it
 		existingCM.Data = configMap.Data
 		existingCM.Labels = configMap.Labels
+		existingCM.Annotations = configMap.Annotations
 		_, err = kubeClient.CoreV1().ConfigMaps(namespace).Update(ctx, existingCM, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to update configmap: %v", err)
-		}
-		log.Printf("ConfigMap '%s' updated in namespace '%s'\n", name, namespace)
-	} else {
-		// ConfigMap doesn't exist, create it
-		_, err = kubeClient.CoreV1().ConfigMaps(namespace).Create(ctx, configMap, metav1.CreateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to create configmap: %v", err)
-		}
-		log.Printf("ConfigMap '%s' created in namespace '%s'\n", name, namespace)
+		return err
 	}
 
-	return nil
+	_, err = kubeClient.CoreV1().ConfigMaps(namespace).Create(ctx, configMap, metav1.CreateOptions{})
+	return err
 }
 
+// Script Generator
 func generatePySparkScript(job ETLJobRequest) string {
 	var b strings.Builder
 
-	// Import statements
 	b.WriteString("from pyspark.sql import SparkSession\n")
 	b.WriteString("from pyspark.sql.functions import *\n")
-	b.WriteString("from pyspark.sql.types import *\n")
-	b.WriteString("\n")
+	b.WriteString("from pyspark.sql.types import *\n\n")
 
-	// Create Spark Session
 	b.WriteString(fmt.Sprintf("spark = SparkSession.builder.appName(\"%s\").getOrCreate()\n\n", job.JobName))
-
-	// Generate source reading code
 	b.WriteString(generateSourceCode(job.Source))
 	b.WriteString("\n")
 
-	// Generate transformation code
 	if len(job.Transforms) > 0 {
 		b.WriteString("# Apply transformations\n")
 		b.WriteString(generateTransformCode(job.Transforms))
 		b.WriteString("\n")
 	} else {
-		b.WriteString("# No transformations applied\n")
 		b.WriteString("df_final = df\n\n")
 	}
 
-	// Generate target writing code
 	if job.Target != nil {
 		b.WriteString(generateTargetCode(*job.Target))
 	}
@@ -181,12 +167,14 @@ func generatePySparkScript(job ETLJobRequest) string {
 	return b.String()
 }
 
+// Source Code Generator
 func generateSourceCode(source DataSource) string {
 	var b strings.Builder
 
 	switch source.Type {
+
 	case "s3", "s3_compatible":
-		b.WriteString(fmt.Sprintf("# S3 Configuration\n"))
+		b.WriteString("# S3 Configuration\n")
 		b.WriteString(fmt.Sprintf("spark._jsc.hadoopConfiguration().set(\"fs.s3a.access.key\", \"%s\")\n", source.AccessKey))
 		b.WriteString(fmt.Sprintf("spark._jsc.hadoopConfiguration().set(\"fs.s3a.secret.key\", \"%s\")\n", source.SecretKey))
 
@@ -205,15 +193,13 @@ func generateSourceCode(source DataSource) string {
 			b.WriteString("df = spark.read.json(path, multiLine=True)\n")
 		case "parquet":
 			b.WriteString("df = spark.read.parquet(path)\n")
-		case "orc":
-			b.WriteString("df = spark.read.orc(path)\n")
 		default:
 			b.WriteString("df = spark.read.csv(path, header=True, inferSchema=True)\n")
 		}
 
 	case "postgresql":
 		jdbcURL := fmt.Sprintf("jdbc:postgresql://%s:%d/%s", source.Host, source.Port, source.Database)
-		b.WriteString(fmt.Sprintf("# PostgreSQL Configuration\n"))
+		b.WriteString("# PostgreSQL Configuration\n")
 		b.WriteString(fmt.Sprintf("jdbc_url = \"%s\"\n", jdbcURL))
 		b.WriteString("properties = {\n")
 		b.WriteString(fmt.Sprintf("    \"user\": \"%s\",\n", source.User))
@@ -227,6 +213,7 @@ func generateSourceCode(source DataSource) string {
 	return b.String()
 }
 
+// Transform Code
 func generateTransformCode(transforms []Transform) string {
 	var b strings.Builder
 
@@ -236,143 +223,126 @@ func generateTransformCode(transforms []Transform) string {
 		b.WriteString(fmt.Sprintf("# Transform %d: %s\n", i+1, transform.Type))
 
 		switch transform.Type {
+
 		case "filter":
-			if condition, ok := transform.Parameters["condition"].(string); ok {
-				b.WriteString(fmt.Sprintf("df_transformed = df_transformed.filter(\"%s\")\n", condition))
+			if cond, ok := transform.Parameters["condition"].(string); ok {
+				b.WriteString(fmt.Sprintf("df_transformed = df_transformed.filter(\"%s\")\n", cond))
 			}
 
 		case "select":
-			if columns, ok := transform.Parameters["columns"].([]interface{}); ok {
-				columnList := make([]string, len(columns))
-				for i, col := range columns {
-					columnList[i] = fmt.Sprintf("\"%s\"", col.(string))
+			if cols, ok := transform.Parameters["columns"].([]interface{}); ok {
+				var list []string
+				for _, col := range cols {
+					list = append(list, fmt.Sprintf("\"%s\"", col.(string)))
 				}
-				b.WriteString(fmt.Sprintf("df_transformed = df_transformed.select(%s)\n", strings.Join(columnList, ", ")))
+				b.WriteString(fmt.Sprintf("df_transformed = df_transformed.select(%s)\n", strings.Join(list, ", ")))
 			}
 
 		case "rename_column":
-			if oldName, ok1 := transform.Parameters["old_name"].(string); ok1 {
-				if newName, ok2 := transform.Parameters["new_name"].(string); ok2 {
-					b.WriteString(fmt.Sprintf("df_transformed = df_transformed.withColumnRenamed(\"%s\", \"%s\")\n", oldName, newName))
-				}
-			}
+			oldName, _ := transform.Parameters["old_name"].(string)
+			newName, _ := transform.Parameters["new_name"].(string)
+			b.WriteString(fmt.Sprintf("df_transformed = df_transformed.withColumnRenamed(\"%s\", \"%s\")\n", oldName, newName))
 
 		case "drop_column":
-			if columns, ok := transform.Parameters["columns"].([]interface{}); ok {
-				for _, col := range columns {
+			if cols, ok := transform.Parameters["columns"].([]interface{}); ok {
+				for _, col := range cols {
 					b.WriteString(fmt.Sprintf("df_transformed = df_transformed.drop(\"%s\")\n", col.(string)))
 				}
 			}
 
 		case "add_column":
-			if columnName, ok1 := transform.Parameters["column_name"].(string); ok1 {
-				if expression, ok2 := transform.Parameters["expression"].(string); ok2 {
-					b.WriteString(fmt.Sprintf("df_transformed = df_transformed.withColumn(\"%s\", %s)\n", columnName, expression))
-				}
-			}
+			col, _ := transform.Parameters["column_name"].(string)
+			expr, _ := transform.Parameters["expression"].(string)
+			b.WriteString(fmt.Sprintf("df_transformed = df_transformed.withColumn(\"%s\", %s)\n", col, expr))
 
 		case "join":
-			if joinType, ok1 := transform.Parameters["join_type"].(string); ok1 {
-				if joinCondition, ok2 := transform.Parameters["join_condition"].(string); ok2 {
-					if rightTable, ok3 := transform.Parameters["right_table"].(string); ok3 {
-						b.WriteString(fmt.Sprintf("# Note: %s should be loaded separately\n", rightTable))
-						b.WriteString(fmt.Sprintf("df_transformed = df_transformed.join(%s, %s, \"%s\")\n", rightTable, joinCondition, joinType))
-					}
-				}
-			}
+			right, _ := transform.Parameters["right_table"].(string)
+			cond, _ := transform.Parameters["join_condition"].(string)
+			jtype, _ := transform.Parameters["join_type"].(string)
+			b.WriteString(fmt.Sprintf("df_transformed = df_transformed.join(%s, %s, \"%s\")\n", right, cond, jtype))
 
 		case "groupby":
-			if groupByCols, ok1 := transform.Parameters["group_by"].([]interface{}); ok1 {
-				if aggFunctions, ok2 := transform.Parameters["aggregations"].(map[string]interface{}); ok2 {
-					groupByList := make([]string, len(groupByCols))
-					for i, col := range groupByCols {
-						groupByList[i] = fmt.Sprintf("\"%s\"", col.(string))
-					}
+			groupCols, _ := transform.Parameters["group_by"].([]interface{})
+			aggs, _ := transform.Parameters["aggregations"].(map[string]interface{})
 
-					var aggList []string
-					for column, function := range aggFunctions {
-						aggList = append(aggList, fmt.Sprintf("%s(\"%s\")", function.(string), column))
-					}
-
-					b.WriteString(fmt.Sprintf("df_transformed = df_transformed.groupBy(%s).agg(%s)\n",
-						strings.Join(groupByList, ", "), strings.Join(aggList, ", ")))
-				}
+			var gcols []string
+			for _, gc := range groupCols {
+				gcols = append(gcols, fmt.Sprintf("\"%s\"", gc.(string)))
 			}
+
+			var aggList []string
+			for col, fun := range aggs {
+				aggList = append(aggList, fmt.Sprintf("%s(\"%s\")", fun.(string), col))
+			}
+
+			b.WriteString(fmt.Sprintf("df_transformed = df_transformed.groupBy(%s).agg(%s)\n",
+				strings.Join(gcols, ", "), strings.Join(aggList, ", ")))
 
 		case "sql":
-			if query, ok := transform.Parameters["query"].(string); ok {
-				if tempView, ok2 := transform.Parameters["temp_view"].(string); ok2 {
-					b.WriteString(fmt.Sprintf("df_transformed.createOrReplaceTempView(\"%s\")\n", tempView))
-					b.WriteString(fmt.Sprintf("df_transformed = spark.sql(\"\"\"%s\"\"\")\n", query))
-				}
-			}
+			query, _ := transform.Parameters["query"].(string)
+			temp, _ := transform.Parameters["temp_view"].(string)
+			b.WriteString(fmt.Sprintf("df_transformed.createOrReplaceTempView(\"%s\")\n", temp))
+			b.WriteString(fmt.Sprintf("df_transformed = spark.sql(\"\"\"%s\"\"\")\n", query))
 
 		case "cast_column":
-			if columnName, ok1 := transform.Parameters["column_name"].(string); ok1 {
-				if dataType, ok2 := transform.Parameters["data_type"].(string); ok2 {
-					b.WriteString(fmt.Sprintf("df_transformed = df_transformed.withColumn(\"%s\", col(\"%s\").cast(\"%s\"))\n",
-						columnName, columnName, dataType))
-				}
-			}
+			col, _ := transform.Parameters["column_name"].(string)
+			typ, _ := transform.Parameters["data_type"].(string)
+			b.WriteString(fmt.Sprintf("df_transformed = df_transformed.withColumn(\"%s\", col(\"%s\").cast(\"%s\"))\n",
+				col, col, typ))
 
 		case "fill_na":
-			if fillValue, ok := transform.Parameters["fill_value"]; ok {
-				var fillValueStr string
-				switch v := fillValue.(type) {
-				case string:
-					fillValueStr = fmt.Sprintf("\"%s\"", v)
-				case bool:
-					if v {
-						fillValueStr = "True"
-					} else {
-						fillValueStr = "False"
-					}
-				case float64, int:
-					fillValueStr = fmt.Sprintf("%v", v)
-				default:
-					fillValueStr = fmt.Sprintf("%v", v)
-				}
+			val := transform.Parameters["fill_value"]
+			var valString string
 
-				if columns, ok2 := transform.Parameters["columns"].([]interface{}); ok2 {
-					columnList := make([]string, len(columns))
-					for i, col := range columns {
-						columnList[i] = fmt.Sprintf("\"%s\"", col.(string))
-					}
-					b.WriteString(fmt.Sprintf("df_transformed = df_transformed.fillna(%s, subset=[%s])\n",
-						fillValueStr, strings.Join(columnList, ", ")))
-				} else {
-					b.WriteString(fmt.Sprintf("df_transformed = df_transformed.fillna(%s)\n", fillValueStr))
+			switch v := val.(type) {
+			case string:
+				valString = fmt.Sprintf("\"%s\"", v)
+			case float64, int:
+				valString = fmt.Sprintf("%v", v)
+			default:
+				valString = fmt.Sprintf("\"%v\"", v)
+			}
+
+			if cols, ok := transform.Parameters["columns"].([]interface{}); ok {
+				var clist []string
+				for _, c := range cols {
+					clist = append(clist, fmt.Sprintf("\"%s\"", c.(string)))
 				}
+				b.WriteString(fmt.Sprintf("df_transformed = df_transformed.fillna(%s, subset=[%s])\n",
+					valString, strings.Join(clist, ", ")))
+			} else {
+				b.WriteString(fmt.Sprintf("df_transformed = df_transformed.fillna(%s)\n", valString))
 			}
 
 		case "drop_duplicates":
-			if columns, ok := transform.Parameters["columns"].([]interface{}); ok {
-				columnList := make([]string, len(columns))
-				for i, col := range columns {
-					columnList[i] = fmt.Sprintf("\"%s\"", col.(string))
+			if cols, ok := transform.Parameters["columns"].([]interface{}); ok {
+				var list []string
+				for _, c := range cols {
+					list = append(list, fmt.Sprintf("\"%s\"", c.(string)))
 				}
-				b.WriteString(fmt.Sprintf("df_transformed = df_transformed.dropDuplicates([%s])\n", strings.Join(columnList, ", ")))
+				b.WriteString(fmt.Sprintf("df_transformed = df_transformed.dropDuplicates([%s])\n",
+					strings.Join(list, ", ")))
 			} else {
 				b.WriteString("df_transformed = df_transformed.dropDuplicates()\n")
 			}
 
 		case "order_by":
-			if columns, ok := transform.Parameters["columns"].([]interface{}); ok {
-				var orderList []string
-				for _, col := range columns {
-					if colMap, ok2 := col.(map[string]interface{}); ok2 {
-						columnName := colMap["column"].(string)
-						order := colMap["order"].(string)
-						if order == "desc" {
-							orderList = append(orderList, fmt.Sprintf("desc(\"%s\")", columnName))
-						} else {
-							orderList = append(orderList, fmt.Sprintf("asc(\"%s\")", columnName))
-						}
+			if cols, ok := transform.Parameters["columns"].([]interface{}); ok {
+				var list []string
+				for _, c := range cols {
+					row := c.(map[string]interface{})
+					name := row["column"].(string)
+					order := row["order"].(string)
+					if order == "desc" {
+						list = append(list, fmt.Sprintf("desc(\"%s\")", name))
+					} else {
+						list = append(list, fmt.Sprintf("asc(\"%s\")", name))
 					}
 				}
-				b.WriteString(fmt.Sprintf("df_transformed = df_transformed.orderBy(%s)\n", strings.Join(orderList, ", ")))
+				b.WriteString(fmt.Sprintf("df_transformed = df_transformed.orderBy(%s)\n", strings.Join(list, ", ")))
 			}
 		}
+
 		b.WriteString("\n")
 	}
 
@@ -380,10 +350,12 @@ func generateTransformCode(transforms []Transform) string {
 	return b.String()
 }
 
+// Target Code Generator
 func generateTargetCode(target Target) string {
 	var b strings.Builder
 
 	switch target.Type {
+
 	case "s3", "s3_compatible":
 		b.WriteString("# Target S3 Configuration\n")
 		b.WriteString(fmt.Sprintf("spark._jsc.hadoopConfiguration().set(\"fs.s3a.access.key\", \"%s\")\n", target.AccessKey))
@@ -394,9 +366,8 @@ func generateTargetCode(target Target) string {
 			b.WriteString("spark._jsc.hadoopConfiguration().set(\"fs.s3a.path.style.access\", \"true\")\n")
 		}
 
-		outputPath := fmt.Sprintf("s3a://%s/%s", target.Bucket, target.Path)
-		b.WriteString(fmt.Sprintf("\noutput_path = \"%s\"\n", outputPath))
-		b.WriteString(fmt.Sprintf("print(f\"\\nMenyimpan DataFrame ke {output_path}...\")\n"))
+		out := fmt.Sprintf("s3a://%s/%s", target.Bucket, target.Path)
+		b.WriteString(fmt.Sprintf("\noutput_path = \"%s\"\n", out))
 
 		mode := target.Mode
 		if mode == "" {
@@ -410,18 +381,13 @@ func generateTargetCode(target Target) string {
 			b.WriteString(fmt.Sprintf("df_final.write.json(output_path, mode=\"%s\")\n", mode))
 		case "parquet":
 			b.WriteString(fmt.Sprintf("df_final.write.parquet(output_path, mode=\"%s\")\n", mode))
-		case "orc":
-			b.WriteString(fmt.Sprintf("df_final.write.orc(output_path, mode=\"%s\")\n", mode))
 		default:
 			b.WriteString(fmt.Sprintf("df_final.write.parquet(output_path, mode=\"%s\")\n", mode))
 		}
 
-		b.WriteString("print(\"DataFrame berhasil disimpan ke S3.\")\n")
-
 	case "postgresql":
-		jdbcURL := fmt.Sprintf("jdbc:postgresql://%s:%d/%s", target.Host, target.Port, target.Database)
-		b.WriteString("# Target PostgreSQL Configuration\n")
-		b.WriteString(fmt.Sprintf("jdbc_url = \"%s\"\n", jdbcURL))
+		jdbc := fmt.Sprintf("jdbc:postgresql://%s:%d/%s", target.Host, target.Port, target.Database)
+		b.WriteString(fmt.Sprintf("jdbc_url = \"%s\"\n", jdbc))
 		b.WriteString("properties = {\n")
 		b.WriteString(fmt.Sprintf("    \"user\": \"%s\",\n", target.User))
 		b.WriteString(fmt.Sprintf("    \"password\": \"%s\",\n", target.Password))
@@ -433,112 +399,247 @@ func generateTargetCode(target Target) string {
 			mode = "overwrite"
 		}
 
-		b.WriteString(fmt.Sprintf("df_final.write.jdbc(\n"))
+		b.WriteString("df_final.write.jdbc(\n")
 		b.WriteString(fmt.Sprintf("    url=jdbc_url,\n"))
 		b.WriteString(fmt.Sprintf("    table=\"%s\",\n", target.Table))
 		b.WriteString(fmt.Sprintf("    mode=\"%s\",\n", mode))
-		b.WriteString(fmt.Sprintf("    properties=properties\n"))
+		b.WriteString("    properties=properties\n")
 		b.WriteString(")\n")
-		b.WriteString("print(\"DataFrame berhasil disimpan ke PostgreSQL.\")\n")
 	}
 
 	return b.String()
 }
 
+// JSON Merge Helper
+func mergeMaps(orig, patch map[string]interface{}) map[string]interface{} {
+	for k, v := range patch {
+		orig[k] = v
+	}
+	return orig
+}
+
+// POST /generate
 func handleGenerateScript(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", 405)
 		return
 	}
 
 	var job ETLJobRequest
 	if err := json.NewDecoder(r.Body).Decode(&job); err != nil {
-		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "Invalid request: "+err.Error(), 400)
 		return
 	}
 
-	// Generate the PySpark script
 	script := generatePySparkScript(job)
 
-	response := GenerateResponse{
+	resp := GenerateResponse{
 		Script: script,
 	}
 
-	// If ConfigMap creation is requested
 	if job.CreateConfigMap {
 		namespace := job.Namespace
 		if namespace == "" {
-			namespace = "spark" // default namespace
+			namespace = "spark"
 		}
 
-		// Use jobName as configMapName (convert to lowercase and replace spaces with hyphens)
-		configMapName := strings.ToLower(strings.ReplaceAll(job.JobName, " ", "-"))
-
-		// Use configMapName from request if provided, otherwise use jobName
-		if job.ConfigMapName != "" {
-			configMapName = job.ConfigMapName
+		cmName := job.ConfigMapName
+		if cmName == "" {
+			cmName = strings.ToLower(strings.ReplaceAll(job.JobName, " ", "-"))
 		}
 
-		// File name inside ConfigMap: jobName.py
 		fileName := fmt.Sprintf("%s.py", strings.ToLower(strings.ReplaceAll(job.JobName, " ", "_")))
+		jobJson, _ := json.Marshal(job)
 
-		// Create ConfigMap
-		err := createConfigMap(namespace, configMapName, fileName, script)
+		err := createConfigMapWithAnnotations(namespace, cmName, fileName, script, string(jobJson))
 		if err != nil {
-			response.ConfigMapStatus = fmt.Sprintf("Failed: %v", err)
-			log.Printf("Error creating ConfigMap: %v\n", err)
+			resp.ConfigMapStatus = fmt.Sprintf("Failed: %v", err)
 		} else {
-			response.ConfigMapName = configMapName
-			response.Namespace = namespace
-			response.ConfigMapStatus = "Created/Updated successfully"
+			resp.ConfigMapStatus = "Created/Updated successfully"
 		}
+
+		resp.ConfigMapName = cmName
+		resp.Namespace = namespace
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	json.NewEncoder(w).Encode(resp)
 }
 
-func handleOptions(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-	w.WriteHeader(http.StatusOK)
-}
-
-func main() {
-	// Initialize Kubernetes client
-	if err := initKubernetesClient(); err != nil {
-		log.Printf("Warning: Kubernetes client initialization failed: %v\n", err)
-		log.Println("ConfigMap creation will not be available")
+// GET /jobs — List All ETL Jobs
+func handleGetJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", 405)
+		return
 	}
 
-	http.HandleFunc("/generate", handleGenerateScript)
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			handleOptions(w, r)
+	ns := r.URL.Query().Get("namespace")
+	if ns == "" {
+		ns = "spark"
+	}
+
+	ctx := context.Background()
+
+	cms, err := kubeClient.CoreV1().ConfigMaps(ns).List(ctx, metav1.ListOptions{
+		LabelSelector: "app=etl-generator,generated=true,script-type=pyspark",
+	})
+	if err != nil {
+		http.Error(w, "Cannot list jobs: "+err.Error(), 500)
+		return
+	}
+
+	var result []map[string]interface{}
+
+	for _, cm := range cms.Items {
+		entry := map[string]interface{}{
+			"name":        cm.Name,
+			"namespace":   cm.Namespace,
+			"labels":      cm.Labels,
+			"annotations": cm.Annotations,
+		}
+		result = append(result, entry)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// UNIVERSAL HANDLER
+// GET /job/{name}
+// PATCH /job/{name}
+func handleJobByName(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) != 2 || parts[0] != "job" {
+		http.Error(w, "Invalid path. Use /job/{name}", 400)
+		return
+	}
+
+	name := parts[1]
+	ns := r.URL.Query().Get("namespace")
+	if ns == "" {
+		ns = "spark"
+	}
+
+	switch r.Method {
+
+	// GET /job/{name}
+	case http.MethodGet:
+		ctx := context.Background()
+
+		cm, err := kubeClient.CoreV1().ConfigMaps(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			http.Error(w, "ConfigMap not found: "+err.Error(), 404)
 			return
 		}
-		fmt.Fprintf(w, "ETL Script Generator API\nEndpoints:\nPOST /generate - Generate PySpark script and optionally create ConfigMap")
+
+		var script string
+		for _, v := range cm.Data {
+			script = v
+			break
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"name":        cm.Name,
+			"namespace":   cm.Namespace,
+			"labels":      cm.Labels,
+			"annotations": cm.Annotations,
+			"script":      script,
+		})
+		return
+
+	// PATCH /job/{name}
+	case http.MethodPatch:
+		ctx := context.Background()
+
+		cm, err := kubeClient.CoreV1().ConfigMaps(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			http.Error(w, "ConfigMap not found: "+err.Error(), 404)
+			return
+		}
+
+		existing := cm.Annotations["etl-job-definition"]
+		if existing == "" {
+			http.Error(w, "No etl-job-definition found", 400)
+			return
+		}
+
+		var original map[string]interface{}
+		json.Unmarshal([]byte(existing), &original)
+
+		var patch map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&patch)
+
+		merged := mergeMaps(original, patch)
+		mergedBytes, _ := json.Marshal(merged)
+
+		var job ETLJobRequest
+		json.Unmarshal(mergedBytes, &job)
+
+		newScript := generatePySparkScript(job)
+		fileName := fmt.Sprintf("%s.py", strings.ToLower(strings.ReplaceAll(job.JobName, " ", "_")))
+
+		patchObj := map[string]interface{}{
+			"metadata": map[string]interface{}{
+				"annotations": map[string]interface{}{
+					"etl-job-definition": string(mergedBytes),
+				},
+			},
+			"data": map[string]interface{}{
+				fileName: newScript,
+			},
+		}
+
+		patchJson, _ := json.Marshal(patchObj)
+
+		_, err = kubeClient.CoreV1().ConfigMaps(ns).Patch(
+			ctx,
+			name,
+			types.StrategicMergePatchType,
+			patchJson,
+			metav1.PatchOptions{},
+		)
+
+		if err != nil {
+			http.Error(w, "Patch failed: "+err.Error(), 500)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"message":       "Job updated successfully",
+			"mergedJob":     job,
+			"updatedScript": newScript,
+		})
+		return
+
+	default:
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
+}
+
+// Main
+func main() {
+	if err := initKubernetesClient(); err != nil {
+		log.Printf("Warning: Kubernetes client initialization failed: %v", err)
+	}
+
+	// Health check endpoint (penting!)
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("OK"))
 	})
+
+	http.HandleFunc("/generate", handleGenerateScript)
+	http.HandleFunc("/jobs", handleGetJobs)
+	http.HandleFunc("/job/", handleJobByName)
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	fmt.Printf("Starting ETL Script Generator server on port %s\n", port)
-	fmt.Println("Available endpoints:")
-	fmt.Println("  POST /generate - Generate PySpark script")
-	if kubeClient != nil {
-		fmt.Println("  - ConfigMap creation: ENABLED")
-	} else {
-		fmt.Println("  - ConfigMap creation: DISABLED")
-	}
-
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	fmt.Println("ETL Script Generator Server started on port 8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }

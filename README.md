@@ -89,3 +89,21 @@ Same as data sources:
 - Amazon S3
 - S3 Compatible Storage
 - PostgreSQL
+
+## API References
+1. POST /generate
+Create pyspark script for the first time also creating kubernetes configmap
+```json
+{
+    "createConfigMap": true
+}
+```
+2. GET /jobs
+List all created configmap and pyspark script
+3. GET /job/{job-name}
+Mengambil:
+- job definition (annotation)
+- pyspark script
+- metadata
+4. PATCH /job/{job-name}
+Patch job definition (JSON) + regenerate script + patch ConfigMap.
